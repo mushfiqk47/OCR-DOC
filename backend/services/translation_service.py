@@ -1,180 +1,144 @@
-
 import io
-import pytesseract
-from PIL import Image, ImageDraw, ImageFont
+import asyncio
+import markdown
+from PIL import Image
+from xhtml2pdf import pisa
 from backend.services.pdf_service import render_pdf_to_images
 from backend.services.ollama_client import ollama_client
+from backend.services.image_service import image_to_base64, preprocess_image
 from backend.config import settings
-import textwrap
-import asyncio
-import uuid
 
 class PdfTranslatorService:
     @staticmethod
     async def translate_pdf(pdf_bytes: bytes, target_lang: str = "Spanish") -> bytes:
         """
-        Translates a PDF file while preserving layout.
-        1. Render PDF to images (pypdfium2)
-        2. OCR to get text blocks and coordinates (pytesseract)
-        3. Group words into paragraphs
-        4. Translate paragraphs (Ollama)
-        5. Overlay translated text on images
-        6. Convert back to PDF
+        New Pipeline:
+        1. Render PDF to images.
+        2. OCR each page to Markdown text.
+        3. Insert [Image Page X] placeholders.
+        4. Translate the Markdown content.
+        5. Convert Translated Markdown to a "Preview Mode" PDF.
         """
         
         # 1. Render PDF to images
         images = render_pdf_to_images(pdf_bytes)
-        translated_images = []
+        
+        # 2. Extract Markdown content using OCR
+        md_pages = []
+        sem = asyncio.Semaphore(5)
 
-        # Process each page
-        for page_idx, img in enumerate(images):
-            # 2. Get OCR Data (box, text, confidence)
-            try:
-                # Need explicit config for layout analysis if possible, but default usually works
-                ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-            except pytesseract.TesseractNotFoundError:
-                print("Tesseract not found. Returning original image.")
-                translated_images.append(img)
-                continue
-            except Exception as e:
-                print(f"OCR Error on page {page_idx}: {e}")
-                translated_images.append(img)
-                continue
+        async def ocr_page(idx, img):
+            async with sem:
+                processed = preprocess_image(img)
+                b64 = image_to_base64(processed)
+                # Specific prompt to get structured markdown
+                text = await ollama_client.ocr_image(
+                    b64, 
+                    prompt="Extract all text from this page. Use Markdown for structure. Do not describe the layout. If there are charts or complex images, just ignore them, as I will add a placeholder."
+                )
+                return idx, text
 
-            draw = ImageDraw.Draw(img, "RGBA")
-            
-            n_boxes = len(ocr_data['level'])
-            
-            blocks = {} # Key: "block_par", Value: {words: [], left, top, right, bottom}
+        tasks = [ocr_page(i, img) for i, img in enumerate(images)]
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            results.sort(key=lambda x: x[0])
+            for idx, text in results:
+                # Add [Image Page X] as requested
+                page_content = f"### [Image Page {idx + 1}]\n\n{text}"
+                md_pages.append(page_content)
 
-            for i in range(n_boxes):
-                text = ocr_data['text'][i].strip()
-                # Level 5 is Word. We only care about words with content.
-                if not text:
-                    continue
-                
-                block_num = ocr_data['block_num'][i]
-                par_num = ocr_data['par_num'][i]
-                
-                # key to group by paragraph within a block
-                key = f"{block_num}_{par_num}"
-                
-                x = ocr_data['left'][i]
-                y = ocr_data['top'][i]
-                w = ocr_data['width'][i]
-                h = ocr_data['height'][i]
-                
-                if key not in blocks:
-                    blocks[key] = {
-                        'words': [],
-                        'left': x,
-                        'top': y,
-                        'right': x + w,
-                        'bottom': y + h
-                    }
-                
-                blocks[key]['words'].append(text)
-                # Expand boundaries
-                blocks[key]['left'] = min(blocks[key]['left'], x)
-                blocks[key]['top'] = min(blocks[key]['top'], y)
-                blocks[key]['right'] = max(blocks[key]['right'], x + w)
-                blocks[key]['bottom'] = max(blocks[key]['bottom'], y + h)
+        full_md_content = "\n\n---\n\n".join(md_pages)
 
-            # 3. Translate Paragraphs
-            tasks = []
-            keys = []
-            
-            # Semaphore to limit concurrent Ollama requests
-            sem = asyncio.Semaphore(5)
+        # 3. Translate the full Markdown content
+        # We split by page to avoid token limits and keep it manageable
+        translated_md_pages = []
+        
+        async def translate_page(text):
+            async with sem:
+                return await ollama_client.translate_text(text, target_lang)
 
-            async def translate_with_sem(text, lang):
-                async with sem:
-                    return await ollama_client.translate_text(text, lang)
+        translation_tasks = [translate_page(p) for p in md_pages]
+        if translation_tasks:
+            translated_results = await asyncio.gather(*translation_tasks)
+            translated_md_pages = translated_results
 
-            for key, block in blocks.items():
-                original_text = " ".join(block['words'])
-                # Only translate substantial text
-                if len(original_text) < 2: 
-                    continue
-                tasks.append(translate_with_sem(original_text, target_lang))
-                keys.append(key)
+        final_translated_md = "\n\n---\n\n".join(translated_md_pages)
 
-            # Parallel execution with concurrency limit
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                results = []
+        # 4. Convert MD to HTML with "Preview Mode" styling
+        html_content = markdown.markdown(final_translated_md, extensions=['extra', 'codehilite'])
+        
+        styled_html = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                @page {{
+                    size: letter;
+                    margin: 2cm;
+                }}
+                body {{
+                    font-family: 'Helvetica', 'Arial', sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    background-color: #fff;
+                }}
+                h1, h2, h3 {{
+                    color: #2c3e50;
+                    border-bottom: 1px solid #eee;
+                    padding-bottom: 0.3em;
+                }}
+                hr {{
+                    border: 0;
+                    border-top: 1px solid #ccc;
+                    margin: 2em 0;
+                    page-break-after: always;
+                }}
+                pre {{
+                    background-color: #f8f8f8;
+                    padding: 1em;
+                    border-radius: 5px;
+                    border: 1px solid #ddd;
+                    font-family: 'Courier New', Courier, monospace;
+                }}
+                blockquote {{
+                    border-left: 4px solid #ddd;
+                    padding-left: 1em;
+                    color: #777;
+                    font-style: italic;
+                }}
+                table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin-bottom: 1em;
+                }}
+                th, td {{
+                    border: 1px solid #ddd;
+                    padding: 8px;
+                    text-align: left;
+                }}
+                th {{
+                    background-color: #f2f2f2;
+                }}
+                .page-label {{
+                    color: #95a5a6;
+                    font-size: 0.9em;
+                    margin-bottom: 1em;
+                    font-weight: bold;
+                }}
+            </style>
+        </head>
+        <body>
+            {html_content}
+        </body>
+        </html>
+        """
 
-            translations_map = {}
-            for k, res in zip(keys, results):
-                if isinstance(res, Exception):
-                    print(f"Translation failed for block {k}: {res}")
-                    continue
-                translations_map[k] = res
-
-            # 4. Draw Layout
-            # Calculate base font size from DPI (default 12pt @ 72dpi)
-            dpi_scale = settings.PDF_DPI / 72.0
-            
-            try:
-                # Try standard fonts
-                font_path = "arial.ttf"
-                # Use a larger base size for high DPI
-                base_font_size = int(12 * dpi_scale)
-                font = ImageFont.truetype(font_path, base_font_size)
-            except IOError:
-                font = ImageFont.load_default()
-                base_font_size = int(10 * dpi_scale) 
-
-            for key, block in blocks.items():
-                if key not in translations_map:
-                    continue
-
-                t_text = translations_map[key]
-                x = block['left']
-                y = block['top']
-                w = block['right'] - block['left']
-                h = block['bottom'] - block['top']
-                
-                # Adjust font size to fit block height if it's significantly different
-                current_font_size = base_font_size
-                block_font = font
-                if h > 0:
-                    # Use about 80% of block height as font size target
-                    target_h = int(h * 0.8)
-                    if abs(target_h - base_font_size) > 5:
-                         current_font_size = max(8, min(target_h, int(24 * dpi_scale)))
-                         try:
-                             block_font = ImageFont.truetype("arial.ttf", current_font_size)
-                         except:
-                             block_font = font
-
-                # Draw white box background to mask original text
-                draw.rectangle([x-1, y-1, block['right']+1, block['bottom']+1], fill=(255, 255, 255, 255))
-                
-                # Text Wrapping Logic
-                char_width_approx = current_font_size * 0.5
-                chars_per_line = max(1, int(w / char_width_approx))
-                
-                wrapped_lines = textwrap.wrap(t_text, width=chars_per_line)
-                
-                current_y = y
-                for line in wrapped_lines:
-                    draw.text((x, current_y), line, font=block_font, fill=(0, 0, 0, 255))
-                    current_y += current_font_size * 1.1
-
-            translated_images.append(img.convert("RGB"))
-
-        # 5. Convert back to PDF
-        if not translated_images:
-             return pdf_bytes 
-             
+        # 5. Convert HTML to PDF
         output_pdf_io = io.BytesIO()
-        translated_images[0].save(
-            output_pdf_io, 
-            "PDF", 
-            resolution=float(settings.PDF_DPI), 
-            save_all=True, 
-            append_images=translated_images[1:]
-        )
+        pisa_status = pisa.CreatePDF(styled_html, dest=output_pdf_io)
+        
+        if pisa_status.err:
+             # Fallback if pisa fails
+             return pdf_bytes
+             
         return output_pdf_io.getvalue()
