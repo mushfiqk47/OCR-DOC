@@ -4,6 +4,7 @@ import pytesseract
 from PIL import Image, ImageDraw, ImageFont
 from backend.services.pdf_service import render_pdf_to_images
 from backend.services.ollama_client import ollama_client
+from backend.config import settings
 import textwrap
 import asyncio
 import uuid
@@ -80,19 +81,25 @@ class PdfTranslatorService:
                 blocks[key]['bottom'] = max(blocks[key]['bottom'], y + h)
 
             # 3. Translate Paragraphs
-            # Prepare tasks logic
             tasks = []
             keys = []
+            
+            # Semaphore to limit concurrent Ollama requests
+            sem = asyncio.Semaphore(5)
+
+            async def translate_with_sem(text, lang):
+                async with sem:
+                    return await ollama_client.translate_text(text, lang)
 
             for key, block in blocks.items():
                 original_text = " ".join(block['words'])
                 # Only translate substantial text
-                if len(original_text) < 3: 
+                if len(original_text) < 2: 
                     continue
-                tasks.append(ollama_client.translate_text(original_text, target_lang))
+                tasks.append(translate_with_sem(original_text, target_lang))
                 keys.append(key)
 
-            # Parallel execution
+            # Parallel execution with concurrency limit
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
             else:
@@ -106,14 +113,18 @@ class PdfTranslatorService:
                 translations_map[k] = res
 
             # 4. Draw Layout
+            # Calculate base font size from DPI (default 12pt @ 72dpi)
+            dpi_scale = settings.PDF_DPI / 72.0
+            
             try:
                 # Try standard fonts
-                font_name = "arial.ttf"
-                base_font_size = 12
-                font = ImageFont.truetype(font_name, base_font_size)
+                font_path = "arial.ttf"
+                # Use a larger base size for high DPI
+                base_font_size = int(12 * dpi_scale)
+                font = ImageFont.truetype(font_path, base_font_size)
             except IOError:
                 font = ImageFont.load_default()
-                base_font_size = 10 # approximate
+                base_font_size = int(10 * dpi_scale) 
 
             for key, block in blocks.items():
                 if key not in translations_map:
@@ -125,23 +136,32 @@ class PdfTranslatorService:
                 w = block['right'] - block['left']
                 h = block['bottom'] - block['top']
                 
-                # Draw white box background
-                # Pad slightly
-                draw.rectangle([x-2, y-2, block['right']+2, block['bottom']+2], fill=(255, 255, 255, 255))
+                # Adjust font size to fit block height if it's significantly different
+                current_font_size = base_font_size
+                block_font = font
+                if h > 0:
+                    # Use about 80% of block height as font size target
+                    target_h = int(h * 0.8)
+                    if abs(target_h - base_font_size) > 5:
+                         current_font_size = max(8, min(target_h, int(24 * dpi_scale)))
+                         try:
+                             block_font = ImageFont.truetype("arial.ttf", current_font_size)
+                         except:
+                             block_font = font
+
+                # Draw white box background to mask original text
+                draw.rectangle([x-1, y-1, block['right']+1, block['bottom']+1], fill=(255, 255, 255, 255))
                 
                 # Text Wrapping Logic
-                # Estimate char width (approx 0.6 of font size usually)
-                char_width_approx = base_font_size * 0.6
+                char_width_approx = current_font_size * 0.5
                 chars_per_line = max(1, int(w / char_width_approx))
                 
                 wrapped_lines = textwrap.wrap(t_text, width=chars_per_line)
                 
-                # Simple vertical layout
                 current_y = y
                 for line in wrapped_lines:
-                    # Check if we exceed height? For now just draw, overflow is better than hidden
-                    draw.text((x, current_y), line, font=font, fill=(0, 0, 0, 255))
-                    current_y += base_font_size * 1.2 # Line height
+                    draw.text((x, current_y), line, font=block_font, fill=(0, 0, 0, 255))
+                    current_y += current_font_size * 1.1
 
             translated_images.append(img.convert("RGB"))
 
@@ -153,7 +173,7 @@ class PdfTranslatorService:
         translated_images[0].save(
             output_pdf_io, 
             "PDF", 
-            resolution=100.0, 
+            resolution=float(settings.PDF_DPI), 
             save_all=True, 
             append_images=translated_images[1:]
         )

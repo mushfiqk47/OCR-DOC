@@ -230,11 +230,20 @@ class OllamaClient:
 
     async def translate_text(self, text: str, target_lang: str) -> str:
         # Validate target language
-        if target_lang not in self.SUPPORTED_LANGUAGES:
-            supported = ", ".join(self.SUPPORTED_LANGUAGES.keys())
-            raise ValueError(f"Unsupported target language: '{target_lang}'. Supported languages: {supported}")
+        # Robust matching: try exact match first, then try matching base name before parentheses
+        target_code = None
+        if target_lang in self.SUPPORTED_LANGUAGES:
+            target_code = self.SUPPORTED_LANGUAGES[target_lang]
+        else:
+            # Try to match the base name (e.g., "Spanish (Mexico)" -> "Spanish")
+            base_lang = target_lang.split("(")[0].strip()
+            if base_lang in self.SUPPORTED_LANGUAGES:
+                target_code = self.SUPPORTED_LANGUAGES[base_lang]
         
-        target_code = self.SUPPORTED_LANGUAGES[target_lang]
+        if not target_code:
+            supported = ", ".join(list(self.SUPPORTED_LANGUAGES.keys())[:20]) + "..."
+            raise ValueError(f"Unsupported target language: '{target_lang}'. Closest supported: {supported}")
+        
         source_lang_name = "English" # Defaulting to English source for simplicity
         source_code = "en"
         

@@ -7,6 +7,7 @@ import LanguageSelector from "@/components/LanguageSelector";
 import { Loader2, Download, AlertCircle, CheckCircle, ArrowLeft, Copy, FileText, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import clsx from "clsx";
 
 // --- Tool Configuration ---
 
@@ -300,6 +301,32 @@ export default function ToolPage({ params }: { params: Promise<{ tool: string }>
         );
     }
 
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = async (text: string) => {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                // Fallback for non-secure contexts or older browsers
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed";
+                textArea.style.left = "-999999px";
+                textArea.style.top = "-999999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                document.execCommand('copy');
+                textArea.remove();
+            }
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Failed to copy: ', err);
+        }
+    };
+
     const handleProcess = async (payload: File | File[] | string) => {
         setStatus("processing");
         setErrorMsg(null);
@@ -443,10 +470,10 @@ export default function ToolPage({ params }: { params: Promise<{ tool: string }>
                     {status !== "idle" && (
                         <button
                             onClick={handleReset}
-                            className="absolute top-4 right-4 p-2 rounded-lg bg-slate-800/50 hover:bg-slate-700 text-slate-400 hover:text-white transition-all z-20 group backdrop-blur-sm border border-white/5"
-                            title="Try Again"
+                            className="absolute top-6 right-6 p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-all z-30 group backdrop-blur-md border border-white/10 shadow-lg"
+                            title="Start Over"
                         >
-                            <RotateCcw className="h-5 w-5 group-active:rotate-[-90deg] transition-transform" />
+                            <RotateCcw className="h-5 w-5 group-hover:rotate-[-45deg] transition-transform duration-300" />
                         </button>
                     )}
 
@@ -484,18 +511,22 @@ export default function ToolPage({ params }: { params: Promise<{ tool: string }>
 
                             {/* Standard Text Result */}
                             {config.resultType === "text" && !translationResult && (
-                                <div className="space-y-3">
+                                <div className="space-y-3 w-full">
                                     <div className="flex items-center justify-between">
-                                        <h3 className="text-sm font-medium text-slate-400">Extracted Text</h3>
+                                        <h3 className="text-sm font-medium text-slate-400">Result Output</h3>
                                         <button
-                                            onClick={() => navigator.clipboard.writeText(resultText || "")}
-                                            className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
+                                            onClick={() => handleCopy(resultText || "")}
+                                            className={clsx(
+                                                "text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all",
+                                                copied ? "text-emerald-400 bg-emerald-500/10" : "text-indigo-400 hover:text-indigo-300 bg-indigo-500/5 hover:bg-indigo-500/10"
+                                            )}
                                         >
-                                            <Copy className="h-3 w-3" /> Copy
+                                            {copied ? <CheckCircle className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                            {copied ? "Copied!" : "Copy Text"}
                                         </button>
                                     </div>
-                                    <div className="bg-slate-950 p-4 rounded-xl text-left font-mono text-sm text-slate-300 overflow-auto max-h-[400px] w-full border border-slate-800 shadow-inner">
-                                        <pre className="whitespace-pre-wrap">{resultText}</pre>
+                                    <div className="bg-slate-950 p-6 rounded-xl text-left font-mono text-sm text-slate-300 overflow-auto max-h-[500px] w-full border border-slate-800 shadow-inner group relative">
+                                        <pre className="whitespace-pre-wrap leading-relaxed">{resultText}</pre>
                                     </div>
                                 </div>
                             )}

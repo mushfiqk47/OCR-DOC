@@ -6,6 +6,10 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from xhtml2pdf import pisa
+import asyncio
+from backend.services.pdf_service import render_pdf_to_images
+from backend.services.ollama_client import ollama_client
+from backend.services.image_service import image_to_base64, preprocess_image
 
 class ConversionService:
     @staticmethod
@@ -48,12 +52,39 @@ class ConversionService:
 
     @staticmethod
     async def pdf_to_text(pdf_bytes: bytes) -> str:
-        """Extract text from PDF (simple extraction)."""
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
+        """
+        Extract text from PDF using High-Fidelity OCR.
+        Renders pages to images and uses the configured OCR model.
+        """
+        images = render_pdf_to_images(pdf_bytes)
+        
+        full_text = []
+        
+        # Semaphore to limit concurrent Ollama requests
+        sem = asyncio.Semaphore(5)
+
+        async def process_page(index, img):
+            async with sem:
+                # Preprocess and encode
+                processed_img = preprocess_image(img)
+                b64 = image_to_base64(processed_img)
+                # Perform OCR
+                # We use a specific prompt for pure text extraction
+                page_text = await ollama_client.ocr_image(
+                    b64, 
+                    prompt="Extract the text content from this page. Return raw text with Markdown formatting for structure. Do not include commentary."
+                )
+                return index, page_text
+
+        tasks = [process_page(i, img) for i, img in enumerate(images)]
+        
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            # Sort by index to ensure page order
+            results.sort(key=lambda x: x[0])
+            full_text = [r[1] for r in results]
+            
+        return "\n\n--- Page Break ---\n\n".join(full_text)
 
     @staticmethod
     async def merge_pdfs(pdf_files: list[bytes]) -> bytes:
