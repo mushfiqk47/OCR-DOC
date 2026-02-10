@@ -1,9 +1,17 @@
+import os
+import sys
+from pathlib import Path
+
+# Add the project root to sys.path to allow 'backend' package imports
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routers import ocr, translate, table, conversion
 from backend.config import settings
 import uvicorn
-import os
 
 app = FastAPI(
     title="DocIntel — Document Intelligence Platform",
@@ -45,4 +53,4 @@ async def health_check():
     return {"status": "ok", "model": settings.OCR_MODEL}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

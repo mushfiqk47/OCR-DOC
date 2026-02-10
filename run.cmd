@@ -7,7 +7,7 @@ echo ==========================================
 
 :: Start Backend in a new window
 echo [1/2] Starting Backend (FastAPI) on port 8000...
-start "DocIntel Backend" cmd /k "cd backend && python main.py"
+start "DocIntel Backend" cmd /k "set PYTHONPATH=.&& python -m backend.main"
 
 :: Start Frontend in a new window
 echo [2/2] Starting Frontend (Next.js) on port 3000...
